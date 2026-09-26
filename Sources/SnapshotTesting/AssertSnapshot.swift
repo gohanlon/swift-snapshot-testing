@@ -332,7 +332,6 @@ public func verifySnapshot<Value, Format>(
         snapshotFileUrl = snapshotFileUrl.appendingPathExtension(ext)
       }
       let fileManager = FileManager.default
-      try fileManager.createDirectory(at: snapshotDirectoryUrl, withIntermediateDirectories: true)
 
       let tookSnapshot = XCTestExpectation(description: "Took snapshot")
       var optionalDiffable: Format?
@@ -367,6 +366,9 @@ public func verifySnapshot<Value, Format>(
         let snapshotData = snapshotting.diffing.toData(diffable)
 
         if writeToDisk {
+          // Made only to be written to, so a run that records nothing never needs to write the
+          // reference directory.
+          try fileManager.createDirectory(at: snapshotDirectoryUrl, withIntermediateDirectories: true)
           try snapshotData.write(to: snapshotFileUrl)
         }
 

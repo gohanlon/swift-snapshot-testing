@@ -75,6 +75,28 @@ class RecordTests: BaseTestCase {
   #endif
 
   #if canImport(Darwin)
+    func testRecordNever_MakesNoReferenceDirectory() throws {
+      // A reference directory that is not there, as one a run may not write is not: recording
+      // nothing, the run never makes it.
+      let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("RecordTests-\(UUID().uuidString)")
+      defer { try? FileManager.default.removeItem(at: directory) }
+
+      let failure = verifySnapshot(
+        of: 42, as: .json, record: .never, snapshotDirectory: directory.path
+      )
+
+      XCTAssertEqual(
+        failure?.hasPrefix(
+          "No reference was found on disk. New snapshot was not recorded because recording is disabled"
+        ),
+        true
+      )
+      XCTAssertEqual(FileManager.default.fileExists(atPath: directory.path), false)
+    }
+  #endif
+
+  #if canImport(Darwin)
     func testRecordMissing() {
       XCTExpectFailure {
         withSnapshotTesting(record: .missing) {
