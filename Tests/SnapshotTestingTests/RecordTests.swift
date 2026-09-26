@@ -37,20 +37,39 @@ class RecordTests: BaseTestCase {
   }
 
   #if canImport(Darwin)
-    func testRecordNever() {
+    func testRecordNever() throws {
+      let artifactURL = URL(
+        fileURLWithPath: ProcessInfo.processInfo.environment["SNAPSHOT_ARTIFACTS"]
+          ?? NSTemporaryDirectory(),
+        isDirectory: true
+      )
+        .appendingPathComponent("RecordTests")
+        .appendingPathComponent(snapshotURL.lastPathComponent)
+      try? FileManager.default.removeItem(at: artifactURL)
+      defer { try? FileManager.default.removeItem(at: artifactURL) }
+
       XCTExpectFailure {
         withSnapshotTesting(record: .never) {
           assertSnapshot(of: 42, as: .json)
         }
       } issueMatcher: {
-        $0.compactDescription == """
-          failed - No reference was found on disk. New snapshot was not recorded because recording is disabled
+        $0.compactDescription.hasPrefix(
           """
+          failed - No reference was found on disk. New snapshot was not recorded because recording is disabled
+
+          The render was written to the artifacts directory instead: …
+          """)
       }
 
       XCTAssertEqual(
         FileManager.default.fileExists(atPath: snapshotURL.path),
         false
+      )
+      // The render is where a failing one's goes, so a run that may not write the reference
+      // directory still leaves it to look at or to copy in.
+      try XCTAssertEqual(
+        String(decoding: Data(contentsOf: artifactURL), as: UTF8.self),
+        "42"
       )
     }
   #endif

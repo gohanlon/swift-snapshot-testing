@@ -423,12 +423,35 @@ public func verifySnapshot<Value, Format>(
           """
       }
 
+      // A render that is not kept as the reference is written here instead, beside the others
+      // of its test file, so it can be looked at, or copied in as the reference, where the
+      // reference directory cannot be written.
+      func writeArtifact() throws -> URL {
+        let artifactsUrl = URL(
+          fileURLWithPath: ProcessInfo.processInfo.environment["SNAPSHOT_ARTIFACTS"]
+            ?? NSTemporaryDirectory(),
+          isDirectory: true
+        )
+        let artifactsSubUrl = artifactsUrl.appendingPathComponent(fileName)
+        try fileManager.createDirectory(at: artifactsSubUrl, withIntermediateDirectories: true)
+        let artifactFileUrl = artifactsSubUrl.appendingPathComponent(
+          snapshotFileUrl.lastPathComponent
+        )
+        try snapshotting.diffing.toData(diffable).write(to: artifactFileUrl)
+        return artifactFileUrl
+      }
+
       guard fileManager.fileExists(atPath: snapshotFileUrl.path) else {
         if record == .never {
           try recordSnapshot(writeToDisk: false)
+          let artifactFileUrl = try writeArtifact()
 
           return """
             No reference was found on disk. New snapshot was not recorded because recording is disabled
+
+            The render was written to the artifacts directory instead: …
+
+            open "\(artifactFileUrl.absoluteString)"
             """
         } else {
           try recordSnapshot(writeToDisk: true)
@@ -460,17 +483,7 @@ public func verifySnapshot<Value, Format>(
         return nil
       }
 
-      let artifactsUrl = URL(
-        fileURLWithPath: ProcessInfo.processInfo.environment["SNAPSHOT_ARTIFACTS"]
-          ?? NSTemporaryDirectory(),
-        isDirectory: true
-      )
-      let artifactsSubUrl = artifactsUrl.appendingPathComponent(fileName)
-      try fileManager.createDirectory(at: artifactsSubUrl, withIntermediateDirectories: true)
-      let failedSnapshotFileUrl = artifactsSubUrl.appendingPathComponent(
-        snapshotFileUrl.lastPathComponent
-      )
-      try snapshotting.diffing.toData(diffable).write(to: failedSnapshotFileUrl)
+      let failedSnapshotFileUrl = try writeArtifact()
 
       if !attachments.isEmpty {
         #if !os(Linux) && !os(Android) && !os(Windows)
