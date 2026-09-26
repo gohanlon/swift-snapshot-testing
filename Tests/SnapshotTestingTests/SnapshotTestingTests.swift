@@ -271,6 +271,39 @@ final class SnapshotTestingTests: BaseTestCase {
     #endif
   }
 
+  func testImagePerceptualPrecisionComparesDifferingImages() throws {
+    #if os(macOS)
+      // A white square, optionally with its top-left quarter in another grey.
+      func square(quarter: CGFloat = 1) -> NSImage {
+        let context = CGContext(
+          data: nil, width: 100, height: 100, bitsPerComponent: 8, bytesPerRow: 0,
+          space: CGColorSpace(name: CGColorSpace.sRGB)!,
+          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 100, height: 100))
+        context.setFillColor(CGColor(gray: quarter, alpha: 1))
+        context.fill(CGRect(x: 0, y: 50, width: 50, height: 50))
+        return NSImage(cgImage: context.makeImage()!, size: NSSize(width: 100, height: 100))
+      }
+      let diffing = Diffing<NSImage>.image(precision: 0.99, perceptualPrecision: 0.98)
+
+      // Images that differ are measured by CoreImage's area reductions, which take their extent
+      // as a `CIVector`. Given a bare `CGRect`, macOS 27 aborts the process here, with
+      // `-[NSConcreteValue CGRectValue]: unrecognized selector sent to instance`, rather than
+      // returning either answer.
+      XCTAssertNil(diffing.diffV2(square(), square(quarter: 254 / 255)))
+      let (message, attachments) = try XCTUnwrap(diffing.diffV2(square(), square(quarter: 0)))
+      let lines = message.split(separator: "\n")
+      XCTAssertEqual(lines.count, 2)
+      XCTAssertEqual(lines.first, "The percentage of pixels that match 0.75 is less than required 0.99")
+      // Black against white is a delta E of about 100, read back through half floats.
+      XCTAssertEqual(lines.last?.hasPrefix("The lowest perceptual color precision 0.0"), true)
+      XCTAssertEqual(lines.last?.hasSuffix(" is less than required 0.98"), true)
+      XCTAssertEqual(attachments.count, 3)
+    #endif
+  }
+
   func testSCNView() {
     // #if os(iOS) || os(macOS) || os(tvOS)
     // // NB: CircleCI crashes while trying to instantiate SCNView.
