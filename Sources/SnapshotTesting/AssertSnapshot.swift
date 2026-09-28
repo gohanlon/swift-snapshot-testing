@@ -583,17 +583,10 @@ func sanitizePathComponent(_ string: String) -> String {
 }
 
 #if !os(Android) && !os(Linux) && !os(Windows)
-  import CoreServices
+  import UniformTypeIdentifiers
 
   func uniformTypeIdentifier(fromExtension pathExtension: String) -> String? {
-    // This can be much cleaner in macOS 11+ using UTType
-    let unmanagedString = UTTypeCreatePreferredIdentifierForTag(
-      kUTTagClassFilenameExtension as CFString,
-      pathExtension as CFString,
-      nil
-    )
-
-    return unmanagedString?.takeRetainedValue() as String?
+    UTType(filenameExtension: pathExtension)?.identifier
   }
 #endif
 
