@@ -291,10 +291,66 @@ private func normalizedComponentDiff(_ old: UIImage, _ new: UIImage) -> UIImage?
   import CoreImage.CIKernel
   import MetalPerformanceShaders
 
-  @available(iOS 10.0, tvOS 10.0, macOS 10.13, *)
+  /// Renders a CoreImage graph into a bitmap, reporting the renderer's failure.
+  ///
+  /// `CIContext.render(_:toBitmap:rowBytes:bounds:format:colorSpace:)` reports nothing when the
+  /// renderer fails (a GPU that refuses the command buffer, say): it leaves the bitmap as it was,
+  /// zeros here, which a perceptual comparison would read as "no pixel differs". Rendering through
+  /// a `CIRenderDestination` and waiting on its task throws the renderer's error instead.
+  @available(iOS 11.0, tvOS 11.0, macOS 10.13, *)
+  struct PerceptualRenderer {
+    var render:
+      (_ image: CIImage, _ context: CIContext, _ bounds: CGRect, _ destination: CIRenderDestination)
+        throws -> Void
+
+    static var live: Self {
+      Self { image, context, bounds, destination in
+        try context
+          .startTask(toRender: image, from: bounds, to: destination, at: .zero)
+          .waitUntilCompleted()
+      }
+    }
+  }
+
+  @available(iOS 11.0, tvOS 11.0, macOS 10.13, *)
   func perceptuallyCompare(
     _ old: CIImage, _ new: CIImage, pixelPrecision: Float, perceptualPrecision: Float
   ) -> String? {
+    perceptuallyCompare(
+      old, new,
+      pixelPrecision: pixelPrecision,
+      perceptualPrecision: perceptualPrecision,
+      renderer: .live,
+      metal: ThresholdImageProcessorKernel.isSupported
+    )
+  }
+
+  @available(iOS 11.0, tvOS 11.0, macOS 10.13, *)
+  func perceptuallyCompare(
+    _ old: CIImage, _ new: CIImage, pixelPrecision: Float, perceptualPrecision: Float,
+    renderer: PerceptualRenderer, metal: Bool
+  ) -> String? {
+    do {
+      return try measurePerceptualDifference(
+        old, new,
+        pixelPrecision: pixelPrecision,
+        perceptualPrecision: perceptualPrecision,
+        renderer: renderer,
+        metal: metal
+      )
+    } catch {
+      return """
+        Newly-taken snapshot could not be compared with reference: \
+        CoreImage failed to render the comparison (\(error.localizedDescription)).
+        """
+    }
+  }
+
+  @available(iOS 11.0, tvOS 11.0, macOS 10.13, *)
+  private func measurePerceptualDifference(
+    _ old: CIImage, _ new: CIImage, pixelPrecision: Float, perceptualPrecision: Float,
+    renderer: PerceptualRenderer, metal: Bool
+  ) throws -> String? {
     // Calculate the deltaE values. Each pixel is a value between 0-100.
     // 0 means no difference, 100 means completely opposite.
     let deltaOutputImage = old.applyingLabDeltaE(new)
@@ -310,21 +366,24 @@ private func normalizedComponentDiff(_ old: UIImage, _ new: UIImage) -> UIImage?
     // However, some virtualized hardware do not have GPUs and therefore do not support Metal.
     // In this case, macOS falls back to a CPU-based OpenGL ES renderer that silently fails when a Metal command is issued.
     // We need to check for Metal device support and fallback to CPU based vImage buffer iteration.
-    if ThresholdImageProcessorKernel.isSupported {
+    if metal {
       // Fast path - Metal processing
       guard
         let thresholdOutputImage = try? deltaOutputImage.applyingThreshold(deltaThreshold),
-        let averagePixel = thresholdOutputImage.applyingAreaAverage().renderSingleValue(in: context)
+        let averagePixel = try thresholdOutputImage.applyingAreaAverage().renderSingleValue(
+          in: context, renderer: renderer)
       else {
         return "Newly-taken snapshot's data could not be processed."
       }
       actualPixelPrecision = 1 - averagePixel
       if actualPixelPrecision < pixelPrecision {
-        maximumDeltaE = deltaOutputImage.applyingAreaMaximum().renderSingleValue(in: context) ?? 0
+        maximumDeltaE =
+          try deltaOutputImage.applyingAreaMaximum().renderSingleValue(
+            in: context, renderer: renderer) ?? 0
       }
     } else {
       // Slow path - CPU based vImage buffer iteration
-      guard let buffer = deltaOutputImage.render(in: context) else {
+      guard let buffer = try deltaOutputImage.render(in: context, renderer: renderer) else {
         return "Newly-taken snapshot could not be processed."
       }
       defer { buffer.free() }
@@ -391,13 +450,17 @@ private func normalizedComponentDiff(_ old: UIImage, _ new: UIImage) -> UIImage?
       applyingFilter("CIAreaMaximum", parameters: [kCIInputExtentKey: CIVector(cgRect: extent)])
     }
 
-    func renderSingleValue(in context: CIContext) -> Float? {
-      guard let buffer = render(in: context) else { return nil }
+    @available(iOS 11.0, tvOS 11.0, macOS 10.13, *)
+    func renderSingleValue(in context: CIContext, renderer: PerceptualRenderer) throws -> Float? {
+      guard let buffer = try render(in: context, renderer: renderer) else { return nil }
       defer { buffer.free() }
       return buffer.data.load(fromByteOffset: 0, as: Float.self)
     }
 
-    func render(in context: CIContext, format: CIFormat = CIFormat.Rh) -> vImage_Buffer? {
+    @available(iOS 11.0, tvOS 11.0, macOS 10.13, *)
+    func render(
+      in context: CIContext, renderer: PerceptualRenderer, format: CIFormat = CIFormat.Rh
+    ) throws -> vImage_Buffer? {
       // Some hardware configurations (virtualized CPU renderers) do not support 32-bit float output formats,
       // so use a compatible 16-bit float format and convert the output value to 32-bit floats.
       guard
@@ -405,14 +468,16 @@ private func normalizedComponentDiff(_ old: UIImage, _ new: UIImage) -> UIImage?
           width: Int(extent.width), height: Int(extent.height), bitsPerPixel: 16)
       else { return nil }
       defer { buffer16.free() }
-      context.render(
-        self,
-        toBitmap: buffer16.data,
-        rowBytes: buffer16.rowBytes,
-        bounds: extent,
-        format: format,
-        colorSpace: nil
+      let destination = CIRenderDestination(
+        bitmapData: buffer16.data,
+        width: Int(buffer16.width),
+        height: Int(buffer16.height),
+        bytesPerRow: buffer16.rowBytes,
+        format: format
       )
+      // No color matching, as `CIContext.render(_:toBitmap:…)` did given a `nil` color space.
+      destination.colorSpace = nil
+      try renderer.render(self, context, extent, destination)
       guard
         var buffer32 = try? vImage_Buffer(
           width: Int(buffer16.width), height: Int(buffer16.height), bitsPerPixel: 32),
